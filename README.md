@@ -70,3 +70,5 @@ PCL v1 | PCL v2
 ------ | ------
   61.5 |  67.6
 
+python main_pcl.py -a resnet50 --lr 0.03 --batch-size 256 --temperature 0.2 --mlp --aug-plus --cos --dist-url 'tcp://localhost:10003' --world-size 1 --rank 0 --exp-dir experiment_pcl --workers 32 --data '/hpi/fs00/share/fg-meinel/datasets/imagenet' --multiprocessing-distributed
+
