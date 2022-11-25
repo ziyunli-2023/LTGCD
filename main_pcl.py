@@ -25,6 +25,7 @@ import torchvision.models as models
 
 import pcl.loader
 import pcl.builder
+import pickle
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -289,10 +290,10 @@ def main_worker(gpu, ngpus_per_node, args):
     for epoch in range(args.start_epoch, args.epochs):
         
         cluster_result = None
-        if epoch>=args.warmup_epoch:
+        if epoch > args.warmup_epoch:
             # compute momentum features for center-cropped images
-            features = compute_features(eval_loader, model, args)         
-            
+            features = compute_features(eval_loader, model, args)
+
             # placeholder for clustering result
             cluster_result = {'im2cluster':[],'centroids':[],'density':[]}
             for num_cluster in args.num_cluster:

@@ -329,6 +329,22 @@ class CIFAR100(data.Dataset):
         fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
         return fmt_str
 
+
+class CIFAR10Pair(CIFAR10):
+    """CIFAR10 Dataset.
+    """
+    def __getitem__(self, index):
+        img = self.data[index]
+        img = Image.fromarray(img)
+
+        if self.transform is not None:
+            im_1 = self.transform(img)
+            im_2 = self.transform(img)
+
+        return im_1, im_2
+
+
+
 def CIFAR10Loader(root, batch_size, split='train', num_workers=2, labeled=True, aug=None, shuffle=True):
     if aug == None:
         transform = transforms.Compose([

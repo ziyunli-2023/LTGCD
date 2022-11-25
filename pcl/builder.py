@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 from random import sample
+from models.my_resnet import BasicBlock
 
 class MoCo(nn.Module):
     """
     Build a MoCo model with: a query encoder, a key encoder, and a queue
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=128, r=16384, m=0.999, T=0.1, mlp=False):
+    def __init__(self, base_encoder, dim=128, r=50, m=0.999, T=0.1, mlp=False):
         """
         dim: feature dimension (default: 128)
         r: queue size; number of negative samples/prototypes (default: 16384)
@@ -23,8 +24,11 @@ class MoCo(nn.Module):
 
         # create the encoders
         # num_classes is the output fc dimension
-        self.encoder_q = base_encoder(num_classes=dim)
-        self.encoder_k = base_encoder(num_classes=dim)
+        # self.encoder_q = base_encoder(num_classes=dim)
+        # self.encoder_k = base_encoder(num_classes=dim)
+
+        self.encoder_q = base_encoder(BasicBlock, [2, 2, 2, 2], num_classes=dim).to("cuda")
+        self.encoder_k = base_encoder(BasicBlock, [2, 2, 2, 2], num_classes=dim).to("cuda")
 
         if mlp:  # hack: brute-force replacement
             dim_mlp = self.encoder_q.fc.weight.shape[1]
@@ -52,7 +56,7 @@ class MoCo(nn.Module):
     @torch.no_grad()
     def _dequeue_and_enqueue(self, keys):
         # gather keys before updating queue
-        keys = concat_all_gather(keys)
+        # keys = concat_all_gather(keys)
 
         batch_size = keys.shape[0]
 
@@ -112,6 +116,27 @@ class MoCo(nn.Module):
 
         return x_gather[idx_this]
 
+    @torch.no_grad()
+    def _batch_shuffle_single_gpu(self, x):
+        """
+        Batch shuffle, for making use of BatchNorm.
+        """
+        # random shuffle index
+        idx_shuffle = torch.randperm(x.shape[0]).cuda()
+
+        # index for restoring
+        idx_unshuffle = torch.argsort(idx_shuffle)
+
+        return x[idx_shuffle], idx_unshuffle
+
+    @torch.no_grad()
+    def _batch_unshuffle_single_gpu(self, x, idx_unshuffle):
+        """
+        Undo batch shuffle.
+        """
+        return x[idx_unshuffle]
+
+
     def forward(self, im_q, im_k=None, is_eval=False, cluster_result=None, index=None):
         """
         Input:
@@ -133,14 +158,16 @@ class MoCo(nn.Module):
         with torch.no_grad():  # no gradient to keys
             self._momentum_update_key_encoder()  # update the key encoder
 
-            # shuffle for making use of BN
-            im_k, idx_unshuffle = self._batch_shuffle_ddp(im_k)
-
+            # # shuffle for making use of BN
+            # im_k, idx_unshuffle = self._batch_shuffle_ddp(im_k)
+            im_k_, idx_unshuffle = self._batch_shuffle_single_gpu(im_k)
+            # im_k = im_k.unsqueeze(0).cuda()
             k = self.encoder_k(im_k)  # keys: NxC
             k = nn.functional.normalize(k, dim=1)
 
-            # undo shuffle
-            k = self._batch_unshuffle_ddp(k, idx_unshuffle)
+            # # undo shuffle
+            # k = self._batch_unshuffle_ddp(k, idx_unshuffle)
+            k = self._batch_unshuffle_single_gpu(k, idx_unshuffle)
 
         # compute query features
         q = self.encoder_q(im_q)  # queries: NxC
@@ -177,7 +204,7 @@ class MoCo(nn.Module):
                 # sample negative prototypes
                 all_proto_id = [i for i in range(im2cluster.max()+1)]       
                 neg_proto_id = set(all_proto_id)-set(pos_proto_id.tolist())
-                neg_proto_id = sample(neg_proto_id,self.r) #sample r negative prototypes 
+                neg_proto_id = sample(neg_proto_id, self.r) #sample r negative prototypes
                 neg_prototypes = prototypes[neg_proto_id]    
 
                 proto_selected = torch.cat([pos_prototypes,neg_prototypes],dim=0)
