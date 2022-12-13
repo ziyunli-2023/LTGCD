@@ -10,6 +10,8 @@ else:
     import pickle
 import torch.utils.data as data
 from data.utils import download_url, check_integrity
+from copy import deepcopy
+import torchvision
 
 
 class CIFAR10(data.Dataset):
@@ -175,3 +177,199 @@ class CIFAR100(CIFAR10):
         'key': 'fine_label_names',
         'md5': '7973b15100ade9c7d40fb424638fde48',
     }
+
+
+# This class is from the GCD code used to generate LT-Datasets
+class CustomCIFAR100(torchvision.datasets.CIFAR100):
+
+    def __init__(self, *args, **kwargs):
+        super(CustomCIFAR100, self).__init__(*args, **kwargs)
+
+        self.uq_idxs = np.array(range(len(self)))
+
+    def __getitem__(self, item):
+        img, label = super().__getitem__(item)
+        uq_idx = self.uq_idxs[item]
+        return img, label, uq_idx
+
+    def __len__(self):
+        return len(self.targets)
+
+def get_cifar_100_datasets(
+    root,
+    train_transform, 
+    test_transform, 
+    prop_indices_to_subsample=0.5, 
+    split_train_val=False, 
+    seed=0,
+    long_tailed_unlabelled_set=False,
+    imbalance_type='step_per_class',
+    imbalance_factor=2,
+    class_num=100,
+    old_class_num=80
+    ):
+
+    np.random.seed(seed)
+
+    # Initialize the entire training set
+    whole_training_set = CustomCIFAR100(
+        root=root, 
+        transform=test_transform, 
+        train=True, 
+        download=True
+    )
+
+    # First, get the whole part of the train dataset that contains the first train classes
+    train_dataset_labelled = subsample_classes(
+        deepcopy(whole_training_set), 
+        include_classes=range(old_class_num)
+    )
+
+    # Second, subsample from this subdataset a proportion per class so that the unlabelled train set can also have samples coming from the train classes
+    train_dataset_labelled = subsample_instances_class_wise(
+        train_dataset_labelled, 
+        prop_indices_to_subsample=prop_indices_to_subsample,
+        num_classes=class_num
+    )
+
+    # Then, get all image indices which do not belong to the labelled train set and use this list of indices to subsample the unlabelled train set
+    unlabelled_indices = set(whole_training_set.uq_idxs) - set(train_dataset_labelled.uq_idxs)
+    train_dataset_unlabelled = subsample_dataset(
+        deepcopy(whole_training_set), 
+        np.array(list(unlabelled_indices))
+    )
+
+    if long_tailed_unlabelled_set:
+        print(f'Length unlabelled train set before long tailed sampling: {len(train_dataset_unlabelled)}')
+        print(f'Using imbalance type: {imbalance_type} with imbalance factor {imbalance_factor}')
+        train_dataset_unlabelled = gen_long_tailed_set(
+            deepcopy(train_dataset_unlabelled),
+            imbalance_type=imbalance_type,
+            imbalance_factor=imbalance_factor,
+            class_num = class_num,
+            old_class_num=old_class_num
+        )
+        print(count_number_per_class(train_dataset_unlabelled))
+
+    # Get test set for all classes
+    test_dataset = CustomCIFAR100(
+        root=root, 
+        transform=test_transform, 
+        train=False, 
+        download=True
+    )
+
+    all_datasets = {
+        'train_labelled': train_dataset_labelled,
+        'train_unlabelled': train_dataset_unlabelled,
+        'test': test_dataset,
+    }
+
+    return all_datasets
+
+def subsample_instances(dataset, prop_indices_to_subsample=0.8):
+
+    np.random.seed(0)
+    subsample_indices = np.random.choice(range(len(dataset)), replace=False,
+                                         size=(int(prop_indices_to_subsample * len(dataset)),))
+    return subsample_indices
+
+def subsample_dataset(dataset, idxs):
+    # Allow for setting in which all empty set of indices is passed
+    if len(idxs) > 0:
+        dataset.data = dataset.data[idxs]
+        dataset.targets = np.array(dataset.targets)[idxs].tolist()
+        dataset.uq_idxs = dataset.uq_idxs[idxs]
+        return dataset
+    else:
+        return None
+
+def subsample_classes(dataset, include_classes=(0, 1, 8, 9)):
+    cls_idxs = [x for x, t in enumerate(dataset.targets) if t in include_classes]
+    target_xform_dict = {}
+    for i, k in enumerate(include_classes):
+        target_xform_dict[k] = i
+    dataset = subsample_dataset(dataset, cls_idxs)
+    return dataset
+
+# use prop_indices_to_subsample specify the split proportion of samples coming from the 
+# known (train) classes between labelled and unlabelled train set
+def subsample_instances_class_wise(dataset, prop_indices_to_subsample, num_classes):
+    np.random.seed(0)
+    targets_np = np.array(dataset.targets, dtype=np.int64)
+    subsample_indices = []
+    for cls in range(num_classes):
+        target_indices = np.where(targets_np == cls)[0].tolist()
+        target_indices = np.random.choice(target_indices, replace=False, size=int(prop_indices_to_subsample * len(target_indices))).tolist()
+        subsample_indices += target_indices
+    return subsample_dataset(dataset, subsample_indices)
+ 
+# used to verify/print the sample distribution per class of a set
+def count_number_per_class(dataset):
+    targets_np = np.array(dataset.targets, dtype=np.int64)
+    print([len(np.where(targets_np == cls)[0]) for cls in range(100)])
+
+# given dataset, subsample a new long-tailed subdataset
+# use imbalance_type to specify the type (step function or exponential) 
+def gen_long_tailed_set(dataset, imbalance_type, imbalance_factor, class_num, old_class_num):
+    np.random.seed(0)
+    print(class_num)
+    print(old_class_num)
+    # array of labels
+    targets_np = np.array(dataset.targets, dtype=np.int64)
+
+    # this will store the indices of the selected images
+    subsample_indices = []
+
+    # for step function, the imbalance_factor will be used to define the length of one step in the step function
+    if imbalance_type == 'step_per_class':
+      
+      max_images = len(np.where(targets_np == 0)[0].tolist())
+      min_images = int(max_images / imbalance_factor)
+      #step_denominator = (max_images * class_num)/(max_images - min_images)
+      step_length = int((max_images - min_images) / (class_num - 1))
+      print(f"step length {step_length}")
+
+      # start with the maximum number of images per class and decrease the value 
+      # with the step_length for every following class
+      # if the reduction leads to the number of images to select < min_images, chose 
+      # min_images samples for the remaining classes
+      num_images_to_select = max_images
+      for cls in range(class_num):
+        target_indices = np.where(targets_np == cls)[0].tolist()
+        if cls == 0:
+          subsample_indices += target_indices
+          continue
+        else:
+          num_images_to_select -= step_length
+          target_indices = np.random.choice(
+            target_indices, 
+            replace=False, 
+            size=num_images_to_select if num_images_to_select >= min_images else min_images
+            ).tolist()
+          subsample_indices += target_indices
+
+    # keep the amount of samples for the known (train) classes the same
+    # and use a reduced amount of samples per class for the remaining (novel) tail classes
+    elif imbalance_type == 'step_unlabeled':
+      max_images = len(np.where(targets_np == 0)[0].tolist())
+      samples_per_novel_class = int(max_images / imbalance_factor)
+      
+      for cls in range(old_class_num):
+        target_indices = np.where(targets_np == cls)[0].tolist()
+        subsample_indices += target_indices
+
+      for cls in range(old_class_num, class_num):
+        target_indices = np.where(targets_np == cls)[0].tolist()
+        target_indices = np.random.choice(target_indices, replace=False, size=int(samples_per_novel_class)).tolist()
+        subsample_indices += target_indices
+
+    elif imbalance_type == 'exponential':
+      max_images = len(np.where(targets_np == 0)[0].tolist())
+      
+      for cls in range(class_num):
+        target_indices = np.where(targets_np == cls)[0].tolist()
+        num_samples_to_select = int(max_images * (1 / imbalance_factor)**(cls / (class_num - 1.0)))
+        target_indices = np.random.choice(target_indices, replace=False, size=int(num_samples_to_select)).tolist()
+        subsample_indices += target_indices
+    return subsample_dataset(dataset, subsample_indices)

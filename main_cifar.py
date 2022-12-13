@@ -28,10 +28,19 @@ from torchvision.datasets import CIFAR100
 from torch.utils.data import DataLoader
 from PIL import Image
 from models.my_resnet import ResNet
+from data.cifar import get_cifar_100_datasets
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
+
+def str2bool(v):
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--data', help='path to dataset', default='/home/datasets/vision/ImageNet/extracted')
@@ -104,6 +113,14 @@ parser.add_argument('--warmup-epoch', default=20, type=int,
                     help='number of warm-up epochs to only train with InfoNCE loss')
 parser.add_argument('--exp-dir', default='experiment_pcl', type=str,
                     help='experiment directory')
+
+parser.add_argument('--long-tailed-unlabeled-set', type=str2bool, default=False, 
+    dest='long_tailed_unlabeled_set')
+parser.add_argument('--long-tailed-imbalance-type', type=str, default="step_unlabeled",
+    dest='long_tailed_imbalance_type')
+parser.add_argument('--long-tailed-imbalance-factor', type=float, default=5,
+    dest='long_tailed_imbalance_factor')
+
 args = parser.parse_args()
 
 class CIFAR100Pair(CIFAR100):
@@ -120,7 +137,6 @@ class CIFAR100Pair(CIFAR100):
 
         return [im_1, im_2], index
 
-
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(32),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -133,14 +149,31 @@ test_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.507, 0.487, 0.441], [0.267, 0.256, 0.276])])
 
+# TODO: Generate as long tailed dataset
 train_data = CIFAR100Pair(root='data', train=True, transform=train_transform, download=True)
 train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                           pin_memory=True,
                           drop_last=True)
 
-eval_dataset = CIFAR100(root='data', train=True, transform=test_transform, download=True)
+#eval_dataset = CIFAR100(root='data', train=True, transform=test_transform, download=True)
+datasets_long_tailed = get_cifar_100_datasets(
+    root='data',
+    train_transform=train_transform,
+    test_transform=test_transform,
+    prop_indices_to_subsample=0.5,
+    split_train_val=False,
+    seed=0,
+    long_tailed_unlabelled_set=args.long_tailed_unlabeled_set,
+    imbalance_type=args.long_tailed_imbalance_type,
+    imbalance_factor=args.long_tailed_imbalance_factor,
+    class_num=100,
+    old_class_num=80 # the number of known classes
+)
+
+# TODO: change name to cluster_dataset, unlabeled dataset
+eval_dataset = datasets_long_tailed['train_unlabelled']
 eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
-                         pin_memory=True)
+                         pin_memory=True, drop_last=True)
 
 test_data = CIFAR100(root='data', train=False, transform=test_transform, download=True)
 test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
@@ -148,7 +181,6 @@ test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, n
 
 
 def main():
-
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -218,7 +250,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # model = pcl.builder.MoCo(
     #     models.__dict__[args.arch],
     #     args.low_dim, args.pcl_r, args.moco_m, args.temperature, args.mlp)
-    print(model)
+    # print(model)
 
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
@@ -280,7 +312,7 @@ def main_worker(gpu, ngpus_per_node, args):
         cluster_result = None
         if epoch >= args.warmup_epoch:
             # compute momentum features for center-cropped images
-            features = compute_features(eval_loader, model, args)
+            features = compute_features(eval_loader, train_loader, model, args)
 
             # placeholder for clustering result
             cluster_result = {'im2cluster': [], 'centroids': [], 'density': []}
@@ -349,6 +381,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result
         output, target, output_proto, target_proto = model(im_q=images[0], im_k=images[1],
                                                            cluster_result=cluster_result, index=index)
 
+        # ONLY CONTRASTIVE LOSS FOR WHOLE DATASET
         # InfoNCE loss
         loss = criterion(output, target)
 
@@ -381,11 +414,15 @@ def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result
             progress.display(i)
 
 
-def compute_features(eval_loader, model, args):
+def compute_features(eval_loader, train_loader, model, args):
     print('Computing features...')
     model.eval()
-    features = torch.zeros(len(eval_loader.dataset), args.low_dim).cuda()
-    for i, (images, index) in enumerate(tqdm(eval_loader)):
+    # TODO: this feature computation fails for LT-data, because the unique ids of the long-tailed images
+    # are arbitrary. This means, that a unique id in the eval_dataset can be higher than the actual length of the
+    # eval_dataset causing an index out of bounds exception in the line where a computed feature is assigned to the
+    # feature space (e.g "features" variable). As a current fix, we use the total length of the train dataset as first dimension
+    features = torch.zeros(len(train_loader.dataset), args.low_dim).cuda()
+    for i, (images, labels, index) in enumerate(tqdm(eval_loader)):
         with torch.no_grad():
             images = images.cuda(non_blocking=True)
             feat = model(images, is_eval=True)
