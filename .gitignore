@@ -140,3 +140,13 @@ legacy
 .vscode
 plot
 viz
+data/cifar-100-python.tar.gz
+data/cifar-100-python/file.txt~
+data/cifar-100-python/meta
+data/cifar-100-python/test
+data/cifar-100-python/train
+data/data/cifar-100-python.tar.gz
+data/data/cifar-100-python/file.txt~
+data/data/cifar-100-python/meta
+data/data/cifar-100-python/test
+data/data/cifar-100-python/train

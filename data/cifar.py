@@ -12,7 +12,7 @@ import torch.utils.data as data
 from data.utils import download_url, check_integrity
 from copy import deepcopy
 import torchvision
-
+import torchvision.transforms as transforms
 
 class CIFAR10(data.Dataset):
     base_folder = 'cifar-10-batches-py'
@@ -82,6 +82,9 @@ class CIFAR10(data.Dataset):
             self.targets = np.array(self.targets)[random_index]
 
         self._load_meta()
+
+        # to track the initial positions of the images in the dataset
+        self.uq_idxs = np.array(range(len(self.data)))
 
     def _load_meta(self):
         path = os.path.join(self.root, self.base_folder, self.meta['filename'])
@@ -155,7 +158,6 @@ class CIFAR10(data.Dataset):
         fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
         return fmt_str
 
-
 class CIFAR100(CIFAR10):
     """`CIFAR100 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
 
@@ -178,6 +180,19 @@ class CIFAR100(CIFAR10):
         'md5': '7973b15100ade9c7d40fb424638fde48',
     }
 
+class CIFAR100Pair(CIFAR100):
+    """CIFAR10 Dataset.
+    """
+
+    def __getitem__(self, index):
+        img = self.data[index]
+        img = Image.fromarray(img)
+
+        if self.transform is not None:
+            im_1 = self.transform(img)
+            im_2 = self.transform(img)
+
+        return [im_1, im_2], index
 
 # This class is from the GCD code used to generate LT-Datasets
 class CustomCIFAR100(torchvision.datasets.CIFAR100):
@@ -212,9 +227,9 @@ def get_cifar_100_datasets(
     np.random.seed(seed)
 
     # Initialize the entire training set
-    whole_training_set = CustomCIFAR100(
+    whole_training_set = CIFAR100(
         root=root, 
-        transform=test_transform, 
+        transform=train_transform, 
         train=True, 
         download=True
     )
@@ -252,12 +267,16 @@ def get_cifar_100_datasets(
         print(count_number_per_class(train_dataset_unlabelled))
 
     # Get test set for all classes
-    test_dataset = CustomCIFAR100(
+    test_dataset = CIFAR100(
         root=root, 
         transform=test_transform, 
         train=False, 
         download=True
     )
+
+    # this is done because during contrastive training 2 views of an image are used
+    
+    train_dataset_labelled = subsample_dataset(CIFAR100Pair(root=root, transform=train_transform, train=True, download=True), idxs=train_dataset_labelled.uq_idxs)
 
     all_datasets = {
         'train_labelled': train_dataset_labelled,
@@ -313,8 +332,6 @@ def count_number_per_class(dataset):
 # use imbalance_type to specify the type (step function or exponential) 
 def gen_long_tailed_set(dataset, imbalance_type, imbalance_factor, class_num, old_class_num):
     np.random.seed(0)
-    print(class_num)
-    print(old_class_num)
     # array of labels
     targets_np = np.array(dataset.targets, dtype=np.int64)
 
@@ -373,3 +390,37 @@ def gen_long_tailed_set(dataset, imbalance_type, imbalance_factor, class_num, ol
         target_indices = np.random.choice(target_indices, replace=False, size=int(num_samples_to_select)).tolist()
         subsample_indices += target_indices
     return subsample_dataset(dataset, subsample_indices)
+
+if __name__ == '__main__':
+
+    x = get_cifar_100_datasets(
+        root='data',
+        train_transform=None, 
+        test_transform=None, 
+        prop_indices_to_subsample=0.5, 
+        split_train_val=False, 
+        seed=0,
+        long_tailed_unlabelled_set=True,
+        imbalance_type='step_per_class',
+        imbalance_factor=2,
+        class_num=100,
+        old_class_num=80
+    )
+
+    print('Printing lens...')
+    for k, v in x.items():
+        if v is not None:
+            print(f'{k}: {len(v)}')
+
+    print('Printing labelled and unlabelled overlap...')
+    print(set.intersection(set(x['train_labelled'].uq_idxs), set(x['train_unlabelled'].uq_idxs)))
+    print('Printing total instances in train...')
+    print(len(set(x['train_labelled'].uq_idxs)) + len(set(x['train_unlabelled'].uq_idxs)))
+
+    print(f'Num Labelled Classes: {len(set(x["train_labelled"].targets))}')
+    print(f'Num Unabelled Classes: {len(set(x["train_unlabelled"].targets))}')
+    print(f'Len labelled set: {len(x["train_labelled"])}')
+    print(f'Len unlabelled set: {len(x["train_unlabelled"])}')
+
+    print(type(x['train_labelled']))
+    print(type(x['train_unlabelled']))

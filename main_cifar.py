@@ -123,20 +123,6 @@ parser.add_argument('--long-tailed-imbalance-factor', type=float, default=5,
 
 args = parser.parse_args()
 
-class CIFAR100Pair(CIFAR100):
-    """CIFAR10 Dataset.
-    """
-
-    def __getitem__(self, index):
-        img = self.data[index]
-        img = Image.fromarray(img)
-
-        if self.transform is not None:
-            im_1 = self.transform(img)
-            im_2 = self.transform(img)
-
-        return [im_1, im_2], index
-
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(32),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -149,14 +135,7 @@ test_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.507, 0.487, 0.441], [0.267, 0.256, 0.276])])
 
-# TODO: Generate as long tailed dataset
-train_data = CIFAR100Pair(root='data', train=True, transform=train_transform, download=True)
-train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
-                          pin_memory=True,
-                          drop_last=True)
-
-#eval_dataset = CIFAR100(root='data', train=True, transform=test_transform, download=True)
-datasets_long_tailed = get_cifar_100_datasets(
+datasets = get_cifar_100_datasets(
     root='data',
     train_transform=train_transform,
     test_transform=test_transform,
@@ -170,12 +149,19 @@ datasets_long_tailed = get_cifar_100_datasets(
     old_class_num=80 # the number of known classes
 )
 
+#train_data = CIFAR100Pair(root='data', train=True, transform=train_transform, download=True)
+train_data = datasets['train_labelled']
+train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
+                          pin_memory=True,
+                          drop_last=True)
+
+
 # TODO: change name to cluster_dataset, unlabeled dataset
-eval_dataset = datasets_long_tailed['train_unlabelled']
-eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
+clustering_unlabeled_dataset = datasets['train_unlabelled']
+clustering_unlabeled_loader = DataLoader(clustering_unlabeled_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
                          pin_memory=True, drop_last=True)
 
-test_data = CIFAR100(root='data', train=False, transform=test_transform, download=True)
+test_data = datasets['test']
 test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
                          pin_memory=True)
 
@@ -312,12 +298,12 @@ def main_worker(gpu, ngpus_per_node, args):
         cluster_result = None
         if epoch >= args.warmup_epoch:
             # compute momentum features for center-cropped images
-            features = compute_features(eval_loader, train_loader, model, args)
+            features = compute_features(clustering_unlabeled_loader, train_loader, model, args)
 
             # placeholder for clustering result
             cluster_result = {'im2cluster': [], 'centroids': [], 'density': []}
             for num_cluster in args.num_cluster:
-                cluster_result['im2cluster'].append(torch.zeros(len(eval_dataset), dtype=torch.long).cuda())
+                cluster_result['im2cluster'].append(torch.zeros(len(clustering_unlabeled_loader), dtype=torch.long).cuda())
                 cluster_result['centroids'].append(torch.zeros(int(num_cluster), args.low_dim).cuda())
                 cluster_result['density'].append(torch.zeros(int(num_cluster)).cuda())
 
@@ -421,8 +407,8 @@ def compute_features(eval_loader, train_loader, model, args):
     # are arbitrary. This means, that a unique id in the eval_dataset can be higher than the actual length of the
     # eval_dataset causing an index out of bounds exception in the line where a computed feature is assigned to the
     # feature space (e.g "features" variable). As a current fix, we use the total length of the train dataset as first dimension
-    features = torch.zeros(len(train_loader.dataset), args.low_dim).cuda()
-    for i, (images, labels, index) in enumerate(tqdm(eval_loader)):
+    features = torch.zeros(len(train_loader.dataset)+len(eval_loader.dataset), args.low_dim).cuda()
+    for i, (images, targets, index) in enumerate(tqdm(eval_loader)):
         with torch.no_grad():
             images = images.cuda(non_blocking=True)
             feat = model(images, is_eval=True)
