@@ -24,11 +24,10 @@ import torchvision.models as models
 
 import pcl.loader
 import pcl.builder
-from torchvision.datasets import CIFAR100
 from torch.utils.data import DataLoader
 from PIL import Image
 from models.my_resnet import ResNet
-from data.cifar import get_cifar_100_datasets
+from data.cifar import get_cifar_100_datasets, CIFAR100Pair, CIFAR100, subsample_dataset
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -122,7 +121,6 @@ parser.add_argument('--long-tailed-imbalance-factor', type=float, default=5,
     dest='long_tailed_imbalance_factor')
 
 args = parser.parse_args()
-
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(32),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -135,39 +133,57 @@ test_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.507, 0.487, 0.441], [0.267, 0.256, 0.276])])
 
+# path to store data
+root = 'data'
+
 datasets = get_cifar_100_datasets(
-    root='data',
+    root=root,
     train_transform=train_transform,
     test_transform=test_transform,
     prop_indices_to_subsample=0.5,
     split_train_val=False,
     seed=0,
-    long_tailed_unlabelled_set=args.long_tailed_unlabeled_set,
+    long_tailed_unlabeled_set=args.long_tailed_unlabeled_set,
     imbalance_type=args.long_tailed_imbalance_type,
     imbalance_factor=args.long_tailed_imbalance_factor,
     class_num=100,
     old_class_num=80 # the number of known classes
 )
 
-#train_data = CIFAR100Pair(root='data', train=True, transform=train_transform, download=True)
-train_data = datasets['train_labelled']
-train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
+# TRAIN DATASET
+# 1. Contains a labelled + unlabeled subset
+# 2. Uses Contrastive Transform for both subsets
+# 3. Unlabeled part is long-tailed
+train_dataset_labeled = CIFAR100Pair(root=root, transform=train_transform, train=True, download=True)
+train_dataset_labeled.data = train_dataset_labeled.data[datasets['train_labeled'].uq_idxs]
+train_dataset_labeled.targets = np.array(train_dataset_labeled.targets)[datasets['train_labeled'].uq_idxs].tolist()
+train_dataset_labeled.uq_idxs = train_dataset_labeled.uq_idxs[datasets['train_labeled'].uq_idxs]
+
+train_dataset_unlabeled = CIFAR100Pair(root=root, transform=train_transform, train=True, download=True)
+train_dataset_unlabeled.data = train_dataset_unlabeled.data[datasets['train_unlabeled'].uq_idxs]
+train_dataset_unlabeled.targets = np.array(train_dataset_unlabeled.targets)[datasets['train_unlabeled'].uq_idxs].tolist()
+train_dataset_unlabeled.uq_idxs = train_dataset_unlabeled.uq_idxs[datasets['train_unlabeled'].uq_idxs]
+
+train_loader_labeled = DataLoader(train_dataset_labeled, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
+                          pin_memory=True,
+                          drop_last=True)
+train_loader_unlabeled = DataLoader(train_dataset_unlabeled, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                           pin_memory=True,
                           drop_last=True)
 
-
-# TODO: change name to cluster_dataset, unlabeled dataset
-clustering_unlabeled_dataset = datasets['train_unlabelled']
+# CLUSTERING/EVALUATION DATASET
+# 1. Contains only unlabeled subset
+# 2. No Contrastive Transform used
+# 3. Unlabeled part is long-tailed
+clustering_unlabeled_dataset = CIFAR100(root=root, transform=test_transform, train=True, download=True)
+clustering_unlabeled_dataset.data = clustering_unlabeled_dataset.data[datasets['train_unlabeled'].uq_idxs]
+clustering_unlabeled_dataset.targets = np.array(clustering_unlabeled_dataset.targets)[datasets['train_unlabeled'].uq_idxs].tolist()
+clustering_unlabeled_dataset.uq_idxs = clustering_unlabeled_dataset.uq_idxs[datasets['train_unlabeled'].uq_idxs]
 clustering_unlabeled_loader = DataLoader(clustering_unlabeled_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
                          pin_memory=True, drop_last=True)
 
-test_data = datasets['test']
-test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
-                         pin_memory=True)
-
-
 def main():
-
+    exit
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -298,15 +314,14 @@ def main_worker(gpu, ngpus_per_node, args):
         cluster_result = None
         if epoch >= args.warmup_epoch:
             # compute momentum features for center-cropped images
-            features = compute_features(clustering_unlabeled_loader, train_loader, model, args)
+            features = compute_features(clustering_unlabeled_loader, model, args)
 
             # placeholder for clustering result
             cluster_result = {'im2cluster': [], 'centroids': [], 'density': []}
             for num_cluster in args.num_cluster:
-                cluster_result['im2cluster'].append(torch.zeros(len(clustering_unlabeled_loader), dtype=torch.long).cuda())
+                cluster_result['im2cluster'].append(torch.zeros(len(clustering_unlabeled_dataset), dtype=torch.long).cuda())
                 cluster_result['centroids'].append(torch.zeros(int(num_cluster), args.low_dim).cuda())
                 cluster_result['density'].append(torch.zeros(int(num_cluster)).cuda())
-
             if args.gpu == 0:
                 features[
                     torch.norm(features, dim=1) > 1.5] /= 2  # account for the few samples that are computed twice
@@ -326,7 +341,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args, cluster_result)
+        train(train_loader_labeled, train_loader_unlabeled, model, criterion, optimizer, epoch, args, cluster_result)
 
         if (epoch + 1) % 5 == 0 and (not args.multiprocessing_distributed or (args.multiprocessing_distributed
                                                                               and args.rank % ngpus_per_node == 0)):
@@ -338,7 +353,7 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best=False, filename='{}/checkpoint_{:04d}.pth.tar'.format(args.exp_dir, epoch))
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result=None):
+def train(train_loader_labeled, train_loader_unlabeled, model, criterion, optimizer, epoch, args, cluster_result=None):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -346,7 +361,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result
     acc_proto = AverageMeter('Acc@Proto', ':6.2f')
 
     progress = ProgressMeter(
-        len(train_loader),
+        len(train_loader_labeled)+len(train_loader_unlabeled),
         [batch_time, data_time, losses, acc_inst, acc_proto],
         prefix="Epoch: [{}]".format(epoch))
 
@@ -354,7 +369,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result
     model.train()
 
     end = time.time()
-    for i, (images, index) in enumerate(train_loader):
+
+    # Iterate over labeled train set and only do InfoNCE
+    for i, (images, index) in enumerate(train_loader_labeled):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -363,7 +380,53 @@ def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
 
         # compute output
-        # print(model)
+        # set cluster_result argument to none, because labeled samples not part of k-means/features
+        output, target, output_proto, target_proto = model(im_q=images[0], im_k=images[1],
+                                                           cluster_result=None, index=index)
+
+        # ONLY CONTRASTIVE LOSS FOR WHOLE DATASET
+        # InfoNCE loss
+        loss = criterion(output, target)
+
+        # ProtoNCE loss
+        if output_proto is not None:
+            loss_proto = 0
+            for proto_out, proto_target in zip(output_proto, target_proto):
+                loss_proto += criterion(proto_out, proto_target)
+                accp = accuracy(proto_out, proto_target)[0]
+                acc_proto.update(accp[0], images[0].size(0))
+
+            # average loss across all sets of prototypes
+            loss_proto /= len(args.num_cluster)
+            loss += loss_proto
+
+        losses.update(loss.item(), images[0].size(0))
+        acc = accuracy(output, target)[0]
+        acc_inst.update(acc[0], images[0].size(0))
+
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % args.print_freq == 0:
+            progress.display(i)
+
+    # Now lastly iterate over unlabeled train set and do InfoNCE + ProtoNCE
+    for i, (images, index) in enumerate(train_loader_unlabeled):
+        # measure data loading time
+        data_time.update(time.time() - end)
+
+        if args.gpu is not None:
+            images[0] = images[0].cuda(args.gpu, non_blocking=True)
+            images[1] = images[1].cuda(args.gpu, non_blocking=True)
+
+        # compute output
+        # here, use the clustering result for ProtoNCE
         output, target, output_proto, target_proto = model(im_q=images[0], im_k=images[1],
                                                            cluster_result=cluster_result, index=index)
 
@@ -400,15 +463,11 @@ def train(train_loader, model, criterion, optimizer, epoch, args, cluster_result
             progress.display(i)
 
 
-def compute_features(eval_loader, train_loader, model, args):
+def compute_features(clustering_unlabeled_loader, model, args):
     print('Computing features...')
     model.eval()
-    # TODO: this feature computation fails for LT-data, because the unique ids of the long-tailed images
-    # are arbitrary. This means, that a unique id in the eval_dataset can be higher than the actual length of the
-    # eval_dataset causing an index out of bounds exception in the line where a computed feature is assigned to the
-    # feature space (e.g "features" variable). As a current fix, we use the total length of the train dataset as first dimension
-    features = torch.zeros(len(train_loader.dataset)+len(eval_loader.dataset), args.low_dim).cuda()
-    for i, (images, targets, index) in enumerate(tqdm(eval_loader)):
+    features = torch.zeros(len(clustering_unlabeled_loader.dataset), args.low_dim).cuda()
+    for i, (images, targets, index) in enumerate(tqdm(clustering_unlabeled_loader)):
         with torch.no_grad():
             images = images.cuda(non_blocking=True)
             feat = model(images, is_eval=True)

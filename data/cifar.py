@@ -217,7 +217,7 @@ def get_cifar_100_datasets(
     prop_indices_to_subsample=0.5, 
     split_train_val=False, 
     seed=0,
-    long_tailed_unlabelled_set=False,
+    long_tailed_unlabeled_set=False,
     imbalance_type='step_per_class',
     imbalance_factor=2,
     class_num=100,
@@ -235,36 +235,36 @@ def get_cifar_100_datasets(
     )
 
     # First, get the whole part of the train dataset that contains the first train classes
-    train_dataset_labelled = subsample_classes(
+    train_dataset_labeled = subsample_classes(
         deepcopy(whole_training_set), 
         include_classes=range(old_class_num)
     )
 
     # Second, subsample from this subdataset a proportion per class so that the unlabelled train set can also have samples coming from the train classes
-    train_dataset_labelled = subsample_instances_class_wise(
-        train_dataset_labelled, 
+    train_dataset_labeled = subsample_instances_class_wise(
+        train_dataset_labeled, 
         prop_indices_to_subsample=prop_indices_to_subsample,
         num_classes=class_num
     )
 
     # Then, get all image indices which do not belong to the labelled train set and use this list of indices to subsample the unlabelled train set
-    unlabelled_indices = set(whole_training_set.uq_idxs) - set(train_dataset_labelled.uq_idxs)
-    train_dataset_unlabelled = subsample_dataset(
+    unlabeled_indices = set(whole_training_set.uq_idxs) - set(train_dataset_labeled.uq_idxs)
+    train_dataset_unlabeled = subsample_dataset(
         deepcopy(whole_training_set), 
-        np.array(list(unlabelled_indices))
+        np.array(list(unlabeled_indices))
     )
 
-    if long_tailed_unlabelled_set:
-        print(f'Length unlabelled train set before long tailed sampling: {len(train_dataset_unlabelled)}')
+    if long_tailed_unlabeled_set:
+        print(f'Length unlabelled train set before long tailed sampling: {len(train_dataset_unlabeled)}')
         print(f'Using imbalance type: {imbalance_type} with imbalance factor {imbalance_factor}')
-        train_dataset_unlabelled = gen_long_tailed_set(
-            deepcopy(train_dataset_unlabelled),
+        train_dataset_unlabeled = gen_long_tailed_set(
+            deepcopy(train_dataset_unlabeled),
             imbalance_type=imbalance_type,
             imbalance_factor=imbalance_factor,
             class_num = class_num,
             old_class_num=old_class_num
         )
-        print(count_number_per_class(train_dataset_unlabelled))
+        print(count_number_per_class(train_dataset_unlabeled))
 
     # Get test set for all classes
     test_dataset = CIFAR100(
@@ -273,15 +273,12 @@ def get_cifar_100_datasets(
         train=False, 
         download=True
     )
-
-    # this is done because during contrastive training 2 views of an image are used
     
-    train_dataset_labelled = subsample_dataset(CIFAR100Pair(root=root, transform=train_transform, train=True, download=True), idxs=train_dataset_labelled.uq_idxs)
-
     all_datasets = {
-        'train_labelled': train_dataset_labelled,
-        'train_unlabelled': train_dataset_unlabelled,
-        'test': test_dataset,
+        'train_data_pcl': subsample_dataset(CIFAR100Pair(root=root, transform=train_transform, train=True, download=True), idxs=list(set(train_dataset_labeled.uq_idxs) | set(train_dataset_unlabeled.uq_idxs))),
+        'train_labeled': train_dataset_labeled,
+        'train_unlabeled': train_dataset_unlabeled,
+        'test': test_dataset
     }
 
     return all_datasets
@@ -400,7 +397,7 @@ if __name__ == '__main__':
         prop_indices_to_subsample=0.5, 
         split_train_val=False, 
         seed=0,
-        long_tailed_unlabelled_set=True,
+        long_tailed_unlabeled_set=True,
         imbalance_type='step_per_class',
         imbalance_factor=2,
         class_num=100,
@@ -413,14 +410,16 @@ if __name__ == '__main__':
             print(f'{k}: {len(v)}')
 
     print('Printing labelled and unlabelled overlap...')
-    print(set.intersection(set(x['train_labelled'].uq_idxs), set(x['train_unlabelled'].uq_idxs)))
+    print(set.intersection(set(x['train_labeled'].uq_idxs), set(x['train_unlabeled'].uq_idxs)))
     print('Printing total instances in train...')
-    print(len(set(x['train_labelled'].uq_idxs)) + len(set(x['train_unlabelled'].uq_idxs)))
+    print(len(set(x['train_labeled'].uq_idxs)) + len(set(x['train_unlabeled'].uq_idxs)))
 
-    print(f'Num Labelled Classes: {len(set(x["train_labelled"].targets))}')
-    print(f'Num Unabelled Classes: {len(set(x["train_unlabelled"].targets))}')
-    print(f'Len labelled set: {len(x["train_labelled"])}')
-    print(f'Len unlabelled set: {len(x["train_unlabelled"])}')
+    print(f'Num Labelled Classes: {len(set(x["train_labeled"].targets))}')
+    print(f'Num Unabelled Classes: {len(set(x["train_unlabeled"].targets))}')
+    print(f'Len labelled set: {len(x["train_labeled"])}')
+    print(f'Len unlabelled set: {len(x["train_unlabeled"])}')
 
-    print(type(x['train_labelled']))
-    print(type(x['train_unlabelled']))
+    print(type(x['train_labeled']))
+    print(type(x['train_unlabeled']))
+    print(type(x['train_data_pcl']))
+    print(len(x['train_data_pcl']))
